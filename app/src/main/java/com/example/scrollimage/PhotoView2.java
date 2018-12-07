@@ -69,6 +69,12 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
      */
     private VelocityTracker mVelocityTracker;
     private GestureDetector gestureDetector;
+    private int mActivePointerId = -1;
+    private int mMinimumVelocity;
+    private int mMaximumVelocity;
+    private int mOverscrollDistance;
+    private int mScrollX,mScrollY;
+    private FlingRunnable mCurrentFlingRunnable;
     private int mTouchSlop;
     public PhotoView2(Context context) {
         super(context);
@@ -90,6 +96,9 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     private void initPhotoView(){
         mScroller = new OverScroller(getContext());
         final ViewConfiguration configuration = ViewConfiguration.get(mContext);
+        mMinimumVelocity = configuration.getScaledMinimumFlingVelocity();
+        mMaximumVelocity = configuration.getScaledMaximumFlingVelocity();
+        mOverscrollDistance = configuration.getScaledOverscrollDistance();
         mTouchSlop = configuration.getScaledTouchSlop();
         setScaleType(ScaleType.MATRIX);
         gestureDetector = new GestureDetector(mContext,this);
@@ -122,17 +131,27 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
         contentF = new RectF(0,0,getWidth(),getHeight());
         postInvalidate();
     }
-
     /**
-     * 修正图片超出边界
+         * 修正图片超出边界
      */
     private void fixTranslation(){
         RectF imageRectF =  new RectF(0,0,mImageSrcWidht,mImageSrcHeight);
         matrix.mapRect(imageRectF);
         float deltaX = 0, deltaY = 0;
-        if (imageRectF.top > 0){
-            //到达最顶端。
-            deltaY = - imageRectF.top;
+        if (imageRectF.height() >= getHeight()){
+            //长图
+            if (imageRectF.top > 0){
+                //到达最顶端。
+                deltaY = - imageRectF.top;
+            }
+
+            if(imageRectF.bottom <= contentF.bottom){
+                //到达最低端
+                deltaY =contentF.bottom- imageRectF.bottom;
+            }
+        }else {
+            //小图
+            deltaY = (getHeight() - imageRectF.height()) / 2 - imageRectF.top;
         }
         if (imageRectF.left > contentF.left){
             deltaX = - imageRectF.left;
@@ -140,13 +159,15 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
         if (imageRectF.right < contentF.right){
             deltaX  = contentF.right - imageRectF.right;
         }
-        if(imageRectF.bottom <= contentF.bottom){
-            //到达最低端
-            deltaY =contentF.bottom- imageRectF.bottom;
-        }
         matrix.postTranslate(deltaX,deltaY);
     }
 
+    private RectF getDisplayRect(){
+        fixTranslation();
+        RectF imageRectF = new RectF(0,0,mImageSrcWidht,mImageSrcHeight);
+        matrix.mapRect(imageRectF);
+        return imageRectF;
+    }
     private void fixScale(){
         zoomStatus = getZoomStatus();
         if (zoomStatus == ZOOM_MINN || zoomStatus == ZOOM_MIN || zoomStatus == ZOOM_NORMAL){
@@ -183,6 +204,12 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     }
     private void endDrag(){
         mIsBeingDragged = false;
+    }
+
+    private void fling(int velocityX,int velocityY){
+        mCurrentFlingRunnable = new FlingRunnable(mContext,this);
+        mCurrentFlingRunnable.fling(getWidth(),getHeight(),velocityX,velocityY);
+        post(mCurrentFlingRunnable);
     }
 
     /**
@@ -255,8 +282,18 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     public boolean onTouchEvent(MotionEvent event) {
         initVelocityTrackerIfNotExists();
         gestureDetector.onTouchEvent(event);
+        if (mVelocityTracker != null) {
+            mVelocityTracker.addMovement(event);
+        }
         switch (event.getAction() & MotionEvent.ACTION_MASK){
             case MotionEvent.ACTION_DOWN:{
+                if (mCurrentFlingRunnable != null){
+                    mCurrentFlingRunnable.cancelFling();
+                }
+                mActivePointerId = event.getPointerId(0);
+                if (!mScroller.isFinished()){
+                    mScroller.abortAnimation();
+                }
                 mLastMotionY = (int) event.getY();
                 mLastMotionX = (int) event.getX();
                 mode = DRAG;
@@ -306,11 +343,22 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
                 break;
             }
             case MotionEvent.ACTION_UP:{
-
+                if (mode == DRAG){
+                    final VelocityTracker velocityTracker = mVelocityTracker;
+                    velocityTracker.computeCurrentVelocity(1000, mMaximumVelocity);
+                    int initialVelocitx = (int) velocityTracker.getXVelocity(mActivePointerId);
+                    int initialVelocity = (int) velocityTracker.getYVelocity(mActivePointerId);
+                    if (Math.abs(initialVelocity) > mMinimumVelocity || Math.abs(initialVelocitx) > mMinimumVelocity){
+                        fling(-initialVelocitx,-initialVelocity);
+                    }
+                }
+                mVelocityTracker.recycle();
+                mVelocityTracker = null;
                 endDrag();
                 break;
             }
         }
+
         return true;
     }
 
@@ -318,6 +366,23 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         setImageMatrix(matrix);
+    }
+
+    @Override
+    protected void onOverScrolled(int scrollX, int scrollY, boolean clampedX, boolean clampedY) {
+        if (!mScroller.isFinished()){
+            int oldX = mScrollX;
+            int oldY = mScrollY;
+            mScrollX = scrollX;
+            mScrollY = scrollY;
+            onScrollChanged(mScrollX,mScrollY,oldX,oldY);
+            if (clampedY){
+                mScroller.springBack(mScrollX,mScrollY,0,0,0,mImageHeight);
+            }
+        }else {
+            super.scrollTo(scrollX,scrollY);
+        }
+        awakenScrollBars();
     }
 
     @Override
@@ -332,12 +397,11 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
             //放大
             scale = maxscaleRate;
             matrix.postScale(scale,scale,e.getX(),e.getY());
-            fixTranslation();
         }else{
             //缩小
-            initImg();
+            matrix.postScale(initScale / getScale(),initScale / getScale(),e.getX(),e.getY());
         }
-
+        fixTranslation();
         postInvalidate();
         return false;
     }
@@ -377,6 +441,64 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
         return false;
     }
 
+    public class FlingRunnable implements Runnable {
+        private final ScrollerProxy mScroller;
+        private int mCurrentX, mCurrentY;
+        private ImageView imageView;
+        public FlingRunnable(Context context,ImageView imageView) {
+            mScroller = ScrollerProxy.getScroller(context);
+            this.imageView = imageView;
+        }
+        public void cancelFling() {
+            mScroller.forceFinished(true);
+        }
+        public void fling(int viewWidth, int viewHeight, int velocityX,
+                          int velocityY) {
+            final RectF rect = getDisplayRect();
+            if (null == rect) {
+                return;
+            }
+
+            final int startX = Math.round(-rect.left);
+            final int minX, maxX, minY, maxY;
+
+            if (viewWidth < rect.width()) {
+                minX = 0;
+                maxX = Math.round(rect.width() - viewWidth);
+            } else {
+                minX = maxX = startX;
+            }
+
+            final int startY = Math.round(-rect.top);
+            if (viewHeight < rect.height()) {
+                minY = 0;
+                maxY = Math.round(rect.height() - viewHeight);
+            } else {
+                minY = maxY = startY;
+            }
+
+            mCurrentX = startX;
+            mCurrentY = startY;
+
+            // If we actually can move, fling the scroller
+            if (startX != maxX || startY != maxY) {
+                mScroller.fling(startX, startY, velocityX, velocityY, minX,
+                        maxX, minY, maxY, 0, 0);
+            }
+        }
+        @Override
+        public void run() {
+            if (mScroller.computeScrollOffset()){
+                final int newX = mScroller.getCurrX();
+                final int newY = mScroller.getCurrY();
+                matrix.postTranslate(mCurrentX - newX,mCurrentY -newY);
+                imageView.postInvalidate();
+                mCurrentX = newX;
+                mCurrentY = newY;
+                Compat.postOnAnimation(imageView, this);
+            }
+        }
+    }
     private class AnimatiedZoomRunnable implements Runnable{
 
         @Override
@@ -388,7 +510,8 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
             }
             if (getZoomStatus() >ZOOM_NORMAL){
                 //修复防止放大超过正常比例，恢复
-                initImg();
+                matrix.postScale(initScale / getScale(),initScale / getScale());
+                fixTranslation();
             }
         }
     }
