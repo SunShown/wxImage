@@ -24,7 +24,7 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     private static final int NONE = 0;   // 初始化
     private static final int DRAG = 1;   // 拖拽
     private static final int ZOOM = 2;   // 缩放
-
+    private static final int SINGDRAG = 3;//下拉　返回
     private static final int ZOOM_MINN =-1;//缩放最小值 <minscale
     private static final int ZOOM_MIN =0;// minScaleRate<=缩放最小值 <1
     private static final int ZOOM_NORMAL = 1;//正常比例 =1
@@ -40,7 +40,6 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     private int mImageSrcWidht;
     private int mImageSrcHeight;
     protected Context mContext;
-    private OverScroller mScroller;
     private float maxscaleRate = 3;//放大 三倍
     private float minScaleRate = 1.0f/3;//最小缩放1/3
     /**
@@ -54,7 +53,9 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
      */
     private int mLastMotionY;
     private int mLastMotionX;
-
+    int lastMoveY = 0;
+    int lastMoveX = 0;
+    int initTouchY = 0;
     /**
      * 上次双手按下的坐标
      */
@@ -75,6 +76,9 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     private int mOverscrollDistance;
     private int mScrollX,mScrollY;
     private FlingRunnable mCurrentFlingRunnable;
+
+    private OnSingleDragListener singleDragListener;
+    private boolean isSingleDraging = false;//正在拖拽
     private int mTouchSlop;
     public PhotoView2(Context context) {
         super(context);
@@ -94,7 +98,6 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
         initPhotoView();
     }
     private void initPhotoView(){
-        mScroller = new OverScroller(getContext());
         final ViewConfiguration configuration = ViewConfiguration.get(mContext);
         mMinimumVelocity = configuration.getScaledMinimumFlingVelocity();
         mMaximumVelocity = configuration.getScaledMaximumFlingVelocity();
@@ -135,8 +138,7 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
          * 修正图片超出边界
      */
     private void fixTranslation(){
-        RectF imageRectF =  new RectF(0,0,mImageSrcWidht,mImageSrcHeight);
-        matrix.mapRect(imageRectF);
+        RectF imageRectF = getDisplayRect();
         float deltaX = 0, deltaY = 0;
         if (imageRectF.height() >= getHeight()){
             //长图
@@ -163,7 +165,6 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
     }
 
     private RectF getDisplayRect(){
-        fixTranslation();
         RectF imageRectF = new RectF(0,0,mImageSrcWidht,mImageSrcHeight);
         matrix.mapRect(imageRectF);
         return imageRectF;
@@ -187,6 +188,18 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
             return false;
         }
         return true;
+    }
+
+    /**
+     * 判断当前是否可以拖拽
+     * @return
+     */
+    private boolean checkSingleDrag(){
+        RectF rectF = getDisplayRect();
+        if (rectF.top >=0 && getScale() == initScale){
+            return true;
+        }
+        return false;
     }
     private int getZoomStatus(){
         float scale = getScale() / initScale;
@@ -271,6 +284,10 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
             mVelocityTracker = VelocityTracker.obtain();
         }
     }
+
+    public void setSingleDragListener(OnSingleDragListener dragListener){
+        this.singleDragListener = dragListener;
+    }
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
@@ -280,6 +297,7 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+
         initVelocityTrackerIfNotExists();
         gestureDetector.onTouchEvent(event);
         if (mVelocityTracker != null) {
@@ -291,12 +309,18 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
                     mCurrentFlingRunnable.cancelFling();
                 }
                 mActivePointerId = event.getPointerId(0);
-                if (!mScroller.isFinished()){
-                    mScroller.abortAnimation();
-                }
                 mLastMotionY = (int) event.getY();
+
                 mLastMotionX = (int) event.getX();
-                mode = DRAG;
+                if (checkSingleDrag()){
+                    mode = SINGDRAG;
+                    lastMoveX = mLastMotionX;
+                    lastMoveY = mLastMotionY;
+                    initTouchY = mLastMotionY;
+                }else {
+
+                    mode = DRAG;
+                }
 
                 break;
             }
@@ -331,6 +355,38 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
                         matrix.postScale(scale,scale,mLastMidPoint.x,mLastMidPoint.y);
                     }
                     mLastDist = distance(event);
+                }else if (mode == SINGDRAG){
+                    int y = (int) event.getY();
+                    int x = (int) event.getX();
+                    float diffY = y - lastMoveY;
+                    float diffX = x - lastMoveX;
+                    float scale = 1 - diffY / getHeight();
+                    matrix.postTranslate(diffX ,diffY);
+                    if (diffY  > 0){
+                        isSingleDraging = true;
+                        //往下滑
+                        if (y - initTouchY < 0){
+                            scale = 1;
+                        }
+                        if (getZoomStatus() == ZOOM_MINN){
+                            //缩放到最小，停止缩放。
+                            scale = 1;
+                        }
+                    }else {
+                        //往上滑
+                        if(y - initTouchY < 0){
+                            //滑动到按下去的上方
+                            if (getScale() > initScale){
+                                scale = 1;
+                            }
+                        }
+                    }
+                    if (singleDragListener != null){
+                        singleDragListener.onSingleDrag(scale,false);
+                    }
+                    matrix.postScale(scale,scale,x,y);
+                    lastMoveX = x;
+                    lastMoveY = y;
                 }
 
                 postInvalidate();
@@ -351,9 +407,19 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
                     if (Math.abs(initialVelocity) > mMinimumVelocity || Math.abs(initialVelocitx) > mMinimumVelocity){
                         fling(-initialVelocitx,-initialVelocity);
                     }
+                }else if (mode == SINGDRAG){
+                    int y = (int) event.getY();
+                    if (y - initTouchY > 360){
+                        //退出
+                        post(new AnimatiedBackRunnable());
+                    }else {
+                        //还原
+                        post(new AnimatiedZoomRunnable());
+                    }
                 }
                 mVelocityTracker.recycle();
                 mVelocityTracker = null;
+                isSingleDraging = false;
                 endDrag();
                 break;
             }
@@ -368,22 +434,6 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
         setImageMatrix(matrix);
     }
 
-    @Override
-    protected void onOverScrolled(int scrollX, int scrollY, boolean clampedX, boolean clampedY) {
-        if (!mScroller.isFinished()){
-            int oldX = mScrollX;
-            int oldY = mScrollY;
-            mScrollX = scrollX;
-            mScrollY = scrollY;
-            onScrollChanged(mScrollX,mScrollY,oldX,oldY);
-            if (clampedY){
-                mScroller.springBack(mScrollX,mScrollY,0,0,0,mImageHeight);
-            }
-        }else {
-            super.scrollTo(scrollX,scrollY);
-        }
-        awakenScrollBars();
-    }
 
     @Override
     public boolean onSingleTapConfirmed(MotionEvent e) {
@@ -514,5 +564,31 @@ public class PhotoView2 extends ImageView implements GestureDetector.OnDoubleTap
                 fixTranslation();
             }
         }
+    }
+
+    private class AnimatiedBackRunnable implements Runnable{
+
+        @Override
+        public void run() {
+            matrix.postScale(0.93f,0.93f,0,0);
+            postInvalidate();
+            if (getScale() / initScale < 0.3f){
+                if (singleDragListener != null){
+                    singleDragListener.onSingleDrag(getScale() / initScale,true);
+                }
+            }else {
+                postDelayed(this,1000 / 60);
+                if (singleDragListener != null){
+                    singleDragListener.onSingleDrag(getScale() / initScale,false);
+                }
+            }
+        }
+    }
+    public interface OnSingleDragListener{
+        /**
+         *
+         * @param scaleValue 缩放比例
+         */
+        void onSingleDrag(float scaleValue,boolean isEnding);
     }
 }
